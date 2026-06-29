@@ -5,6 +5,11 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   pack: {
+    entry: {
+      index: "src/index.ts",
+      reconciliation: "src/reconciliation/index.ts",
+      cli: "src/cli.ts",
+    },
     dts: {
       tsgo: true,
     },
