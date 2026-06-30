@@ -310,4 +310,69 @@ describe("KhaanClient", () => {
     expect(headers["secure"]).toBe("yes");
     expect(headers["user-agent"]).toBe("TestAgent/1.0");
   });
+
+  // --- getTransactions ---
+
+  const multiDateTransactions = [
+    { tranDate: "2026-06-01T00:00:00Z", amount: 1000, description: "June 1" },
+    { tranDate: "2026-06-15T00:00:00Z", amount: 2000, description: "June 15" },
+    { tranDate: "2026-06-28T00:00:00Z", amount: 3000, description: "June 28" },
+    { tranDate: "2026-07-01T00:00:00Z", amount: 4000, description: "July 1" },
+  ];
+
+  test("getTransactions — returns all when no filter", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(multiDateTransactions));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    const transactions = await client.getTransactions();
+
+    expect(transactions).toHaveLength(4);
+  });
+
+  test("getTransactions — filters by fromDate", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(multiDateTransactions));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    const transactions = await client.getTransactions({ fromDate: "2026-06-15" });
+
+    expect(transactions).toHaveLength(3);
+    expect(transactions[0].description).toBe("June 15");
+  });
+
+  test("getTransactions — filters by toDate", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(multiDateTransactions));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    const transactions = await client.getTransactions({ toDate: "2026-06-15" });
+
+    expect(transactions).toHaveLength(2);
+    expect(transactions[1].description).toBe("June 15");
+  });
+
+  test("getTransactions — filters by date range", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(multiDateTransactions));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    const transactions = await client.getTransactions({
+      fromDate: "2026-06-10",
+      toDate: "2026-06-20",
+    });
+
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0].description).toBe("June 15");
+  });
+
+  test("getTransactions — uses accountNumber override in URL", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(multiDateTransactions));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    await client.getTransactions({ accountNumber: "9999999999" });
+
+    expect(getCallUrl(1)).toContain("9999999999");
+  });
 });

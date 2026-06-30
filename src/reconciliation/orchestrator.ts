@@ -1,4 +1,5 @@
-import type { KhaanClient, KhaanTransaction } from "../auth/client.ts";
+import type { KhaanClient } from "../auth/client.ts";
+import type { KhaanTransaction } from "../transactions/types.ts";
 import { KhaanAuthError, KhaanMfaError } from "../errors.ts";
 import { type MatchedKhaanTransaction, findMatchingKhaanTransfer } from "./matching.ts";
 

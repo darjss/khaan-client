@@ -1,18 +1,16 @@
 // khaan-client — TypeScript SDK for Khan Bank (Khaan)
 //
 // Exports:
-//   - KhaanClient, KhaanClientConfig, KhaanTransaction, KhaanLoginResult
+//   - KhaanClient, KhaanClientConfig, KhaanLoginResult
+//   - KhaanTransaction, GetTransactionsOptions
 //   - reconcileTransfer, ReconcilerHooks, ReconcilerOptions, TransferReconciliationState
 //   - findMatchingKhaanTransfer, isIncoming, KhaanMatchResult, MatchedKhaanTransaction
 //   - Error classes
 
 // Client (auth + transactions)
-export {
-  KhaanClient,
-  type KhaanClientConfig,
-  type KhaanTransaction,
-  type KhaanLoginResult,
-} from "./auth/client.ts";
+export { KhaanClient } from "./auth/client.ts";
+export type { KhaanClientConfig, KhaanLoginResult } from "./auth/types.ts";
+export type { KhaanTransaction, GetTransactionsOptions } from "./transactions/types.ts";
 
 // Reconciliation matching (pure functions)
 export {

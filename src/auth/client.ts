@@ -1,132 +1,23 @@
-import ky, { type KyInstance, HTTPError, isHTTPError, isNetworkError } from "ky";
+import ky, { type KyInstance } from "ky";
 import * as v from "valibot";
+import { KhaanAuthError, KhaanMfaError, KhaanNetworkError } from "../errors.ts";
+import { classifyKyError, base64Encode } from "../lib/helpers.ts";
 import {
-  KhaanApiError,
-  KhaanAuthError,
-  KhaanError,
-  KhaanMfaError,
-  KhaanNetworkError,
-  KhaanRateLimitError,
-} from "../errors.ts";
-
-// --- Types (public) ---------------------------------------------------------
-
-export type KhaanClientConfig = {
-  username: string;
-  password: string;
-  deviceId: string;
-  userAgent?: string;
-  accountNumber: string;
-  branchCode?: string;
-};
-
-export type KhaanTransaction = {
-  tranDate?: string;
-  time?: string;
-  amount?: number;
-  description?: string;
-  balance?: number;
-  relatedAccount?: string;
-};
-
-export type KhaanLoginResult =
-  | { status: "logged_in"; accessToken: string }
-  | { status: "mfa_required"; requestId: string };
-
-// --- Schemas (internal, not exported) ---------------------------------------
-
-const ErrorResponseSchema = v.object({
-  message: v.optional(v.string()),
-  error: v.optional(v.string()),
-  code: v.optional(v.string()),
-});
-
-const LoginResponseSchema = v.object({
-  access_token: v.optional(v.string()),
-  access_token_expires_in: v.optional(v.string()),
-  refresh_token: v.optional(v.string()),
-  refresh_token_status: v.optional(v.string()),
-  refresh_token_expires_in: v.optional(v.string()),
-  display_name: v.optional(v.string()),
-  primary_account_id: v.optional(v.string()),
-  unique_id: v.optional(v.string()),
-  message: v.optional(v.string()),
-});
-
-const TransactionSchema = v.object({
-  tranDate: v.optional(v.string()),
-  time: v.optional(v.string()),
-  amount: v.optional(v.number()),
-  description: v.optional(v.string()),
-  balance: v.optional(v.number()),
-  relatedAccount: v.optional(v.string()),
-});
-
-const TransactionListSchema = v.array(TransactionSchema);
-
-// --- Constants --------------------------------------------------------------
-
-const BASE_URL = "https://e.khanbank.com/v3";
-const TOKEN_PATH = "cfrm/auth/token";
-const TOKEN_URL = `${BASE_URL}/${TOKEN_PATH}`;
-
-// --- Helpers (internal) -----------------------------------------------------
-
-const base64Encode = (value: string): string => {
-  if (typeof btoa === "function") return btoa(value);
-  return Buffer.from(value, "utf-8").toString("base64");
-};
-
-/**
- * Extract a human-readable message from a ky HTTPError.
- * ky pre-parses the response body into `error.data` (JSON object or string).
- * Khan Bank returns JSON errors with Mongolian messages.
- */
-const extractErrorMessage = (error: HTTPError): string => {
-  const data = error.data;
-  if (typeof data === "object" && data !== null) {
-    const parsed = v.safeParse(ErrorResponseSchema, data);
-    if (parsed.success) {
-      return (
-        parsed.output.message ?? parsed.output.error ?? parsed.output.code ?? JSON.stringify(data)
-      );
-    }
-    return JSON.stringify(data);
-  }
-  if (typeof data === "string" && data.length > 0) return data;
-  return `Khaan request failed with ${error.response.status}`;
-};
-
-/**
- * Classify a ky HTTPError into the appropriate typed KhaanError.
- * Used in the `beforeError` hook so callers get typed errors.
- */
-const classifyHttpError = (error: HTTPError): KhaanError => {
-  const status = error.response.status;
-  const message = extractErrorMessage(error);
-  const endpoint = error.request.url;
-  const opts = { statusCode: status, endpoint };
-
-  if (status === 429) return new KhaanRateLimitError(message, opts);
-  if (status === 401 || status === 403) return new KhaanAuthError(message, opts);
-  return new KhaanApiError(message, opts);
-};
-
-// --- Token cache (internal) -------------------------------------------------
-
-type TokenState = {
-  accessToken: string;
-  refreshToken?: string;
-  /** Unix ms when the access token expires. */
-  expiresAt: number;
-};
+  LoginResponseSchema,
+  TransactionListSchema,
+  type LoginResponseBody,
+} from "../lib/schemas.ts";
+import { BASE_URL, TOKEN_PATH, TOKEN_URL } from "../lib/constants.ts";
+import type { KhaanClientConfig, KhaanLoginResult, TokenState } from "./types.ts";
+import type { GetTransactionsOptions, KhaanTransaction } from "../transactions/types.ts";
 
 // --- Client -----------------------------------------------------------------
 
 /**
  * Deep module: Khan Bank API client.
  *
- * Interface: `login()`, `loginInitial()`, `dispatchOtp()`, `submitOtp()`, `fetchTransactions()`.
+ * Interface: `login()`, `loginInitial()`, `dispatchOtp()`, `submitOtp()`,
+ * `fetchTransactions()`, `getTransactions()`.
  * Implementation: 3-step SOTP flow, base64 encoding, token caching + auto-refresh,
  * ky hooks for auth injection + 401-retry + error classification, valibot validation.
  */
@@ -143,10 +34,8 @@ export class KhaanClient {
     this.http = ky.create({
       baseUrl: `${BASE_URL}/`,
       headers: this.baseHeaders(),
-      // No retries — banking API should fail-fast, not duplicate operations
       retry: { limit: 0 },
       hooks: {
-        // Inject auth token before every request (if we have one)
         beforeRequest: [
           ({ request }) => {
             if (this.tokenState) {
@@ -154,10 +43,8 @@ export class KhaanClient {
             }
           },
         ],
-        // On 401 for authenticated requests: refresh token and retry once
         afterResponse: [
           async ({ request, response }) => {
-            // Only handle 401 on authenticated, non-token requests
             if (response.status !== 401) return;
             if (request.url.startsWith(TOKEN_URL)) return;
             if (!this.tokenState?.refreshToken) return;
@@ -166,7 +53,6 @@ export class KhaanClient {
             try {
               this.refreshing = true;
               await this.refreshToken();
-              // Retry the original request with the new token
               request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
               return ky(request);
             } finally {
@@ -174,19 +60,7 @@ export class KhaanClient {
             }
           },
         ],
-        // Classify ky errors into typed KhaanErrors before they reach the caller
-        beforeError: [
-          ({ error }) => {
-            if (isHTTPError(error)) return classifyHttpError(error);
-            if (isNetworkError(error)) {
-              return new KhaanNetworkError(`Network error: ${error.message}`, {
-                endpoint: error.request.url,
-                cause: error,
-              });
-            }
-            return error;
-          },
-        ],
+        beforeError: [({ error }) => classifyKyError(error)],
       },
     });
   }
@@ -209,7 +83,6 @@ export class KhaanClient {
       return { accessToken: initial.accessToken };
     }
 
-    // MFA required
     if (!options?.onOtp) {
       throw new KhaanMfaError("MFA required but no onOtp callback provided", {
         endpoint: TOKEN_URL,
@@ -261,8 +134,6 @@ export class KhaanClient {
       requestId,
       secondaryMode: "SOTP",
     });
-    // Step 2 returns a response but without access_token — we just need the
-    // side effect (SMS/email sent). If it fails, postToken throws.
   }
 
   /** Step 3: submit OTP + rememberDevice. Returns tokens. */
@@ -307,6 +178,38 @@ export class KhaanClient {
     return v.parse(TransactionListSchema, json);
   }
 
+  /**
+   * Fetch transactions with optional client-side date filtering and account override.
+   *
+   * The Khan Bank API only exposes a "recent" endpoint (~10 latest) — no
+   * server-side date range. `fromDate`/`toDate` filter the results client-side.
+   * Useful for reconciliation polling where you only care about a specific window.
+   */
+  async getTransactions(options?: GetTransactionsOptions): Promise<KhaanTransaction[]> {
+    this.requireLoggedIn();
+    await this.ensureFreshToken();
+
+    const accountNumber = options?.accountNumber ?? this.config.accountNumber;
+
+    const json = await this.http.get(`account-omni/statement/${accountNumber}/recent/omni`).json();
+
+    const transactions = v.parse(TransactionListSchema, json);
+
+    if (!options?.fromDate && !options?.toDate) {
+      return transactions;
+    }
+
+    const fromMs = options.fromDate ? Date.parse(options.fromDate) : -Infinity;
+    const toMs = options.toDate ? Date.parse(options.toDate) + 86_400_000 : Infinity;
+
+    return transactions.filter((tx) => {
+      if (!tx.tranDate) return false;
+      const txMs = Date.parse(tx.tranDate);
+      if (Number.isNaN(txMs)) return false;
+      return txMs >= fromMs && txMs < toMs;
+    });
+  }
+
   // --- Internal: token management ---
 
   private requireLoggedIn(): void {
@@ -315,10 +218,6 @@ export class KhaanClient {
     }
   }
 
-  /**
-   * Proactively refresh if the token expires within the next 30 seconds.
-   * The afterResponse hook handles reactive refresh on 401.
-   */
   private async ensureFreshToken(): Promise<void> {
     if (!this.tokenState) return;
     if (this.tokenState.expiresAt - Date.now() < 30_000) {
@@ -326,14 +225,11 @@ export class KhaanClient {
     }
   }
 
-  /** Refresh the access token using the refresh_token grant. */
   private async refreshToken(): Promise<void> {
     if (!this.tokenState?.refreshToken) {
       throw new KhaanAuthError("No refresh token available — re-login required");
     }
 
-    // Use a bare ky call (not this.http) to bypass hooks — the refresh
-    // endpoint should not trigger auth injection or 401-retry logic
     const json = await ky
       .post(`${BASE_URL}/${TOKEN_PATH}`, {
         searchParams: {
@@ -347,9 +243,10 @@ export class KhaanClient {
       .json()
       .catch((error: unknown) => {
         this.tokenState = null;
-        if (isHTTPError(error)) {
-          throw new KhaanAuthError(`Token refresh failed: ${extractErrorMessage(error)}`, {
-            statusCode: error.response.status,
+        const classified = classifyKyError(error as Error);
+        if (classified instanceof KhaanAuthError) {
+          throw new KhaanAuthError(`Token refresh failed: ${classified.message}`, {
+            statusCode: classified.statusCode,
             endpoint: TOKEN_URL,
           });
         }
@@ -367,7 +264,7 @@ export class KhaanClient {
     this.setTokenState(body);
   }
 
-  private setTokenState(body: v.InferOutput<typeof LoginResponseSchema>): void {
+  private setTokenState(body: LoginResponseBody): void {
     const expiresIn = Number(body.access_token_expires_in) || 300;
     this.tokenState = {
       accessToken: body.access_token!,
@@ -378,19 +275,10 @@ export class KhaanClient {
 
   // --- Internal: HTTP ---
 
-  /**
-   * POST to the token endpoint with a JSON body.
-   * Used by all 3 login steps (different payloads).
-   * Errors are classified by the beforeError hook.
-   */
-  private async postToken(
-    payload: Record<string, string>,
-  ): Promise<v.InferOutput<typeof LoginResponseSchema>> {
+  private async postToken(payload: Record<string, string>): Promise<LoginResponseBody> {
     const json = await this.http.post(TOKEN_PATH, { json: payload }).json();
     return v.parse(LoginResponseSchema, json);
   }
-
-  // --- Internal: headers ---
 
   private baseHeaders(): Record<string, string> {
     const headers: Record<string, string> = {

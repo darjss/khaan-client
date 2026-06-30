@@ -41,8 +41,12 @@ async function main() {
 
     console.log(`\nLogin successful. Token: ${accessToken.slice(0, 20)}...`);
 
-    console.log("\nFetching recent transactions...");
-    const transactions = await client.fetchTransactions();
+    // Use getTransactions with date filtering (client-side, since the API
+    // only exposes a "recent" endpoint with no server-side date range)
+    const fromDate = "2026-06-10";
+    const toDate = "2026-06-30";
+    console.log(`\nFetching transactions from ${fromDate} to ${toDate}...`);
+    const transactions = await client.getTransactions({ fromDate, toDate });
 
     console.log(`\nGot ${transactions.length} transactions:\n`);
     console.log("Date            | Amount        | Description");

@@ -1,5 +1,5 @@
 import { expect, test, describe } from "vite-plus/test";
-import type { KhaanTransaction } from "../src/auth/client.ts";
+import type { KhaanTransaction } from "../src/transactions/types.ts";
 import { findMatchingKhaanTransfer, isIncoming } from "../src/reconciliation/matching.ts";
 
 const transaction = (overrides: Partial<KhaanTransaction> = {}): KhaanTransaction => ({

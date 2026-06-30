@@ -1,4 +1,4 @@
-import type { KhaanTransaction } from "../auth/client.ts";
+import type { KhaanTransaction } from "../transactions/types.ts";
 
 // --- Types (public) ---------------------------------------------------------
 
