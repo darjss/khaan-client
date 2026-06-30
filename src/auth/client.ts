@@ -11,9 +11,6 @@ import { BASE_URL, TOKEN_PATH, TOKEN_URL } from "../lib/constants.ts";
 import type { KhaanClientConfig, KhaanLoginResult, TokenState } from "./types.ts";
 import type { GetTransactionsOptions, KhaanTransaction } from "../transactions/types.ts";
 
-/** ms before token expiry to proactively re-login */
-const REFRESH_MARGIN_MS = 30_000;
-
 // --- Client -----------------------------------------------------------------
 
 /**
@@ -21,7 +18,7 @@ const REFRESH_MARGIN_MS = 30_000;
  *
  * Interface: `login()`, `loginInitial()`, `dispatchOtp()`, `submitOtp()`,
  * `fetchTransactions()`, `getTransactions()`.
- * Implementation: 3-step SOTP flow, base64 encoding, token caching + auto re-login,
+ * Implementation: 3-step SOTP flow, base64 encoding, token caching + reactive re-login,
  * ky hooks for auth injection + 401-retry + error classification, valibot validation.
  *
  * NOTE: The Khan Bank API returns a `refresh_token` in login responses, but the
@@ -29,6 +26,11 @@ const REFRESH_MARGIN_MS = 30_000;
  * for all attempts). Token renewal is done via re-login using the remembered
  * device (set via `rememberDevice: "Y"` in step 3 of SOTP), which completes in
  * a single step without OTP.
+ *
+ * Re-login is REACTIVE only — triggered by a 401 response, not proactively
+ * before token expiry. This minimizes password-based logins to avoid rate
+ * limiting (429) and suspicious-activity flags. A token that lasts 5 minutes
+ * with 25-second polling means at most 1 re-login per 5 minutes (~12/hour).
  */
 export class KhaanClient {
   private readonly config: KhaanClientConfig;
@@ -45,17 +47,14 @@ export class KhaanClient {
       headers: this.baseHeaders(),
       retry: { limit: 0 },
       hooks: {
-        // Inject auth token + proactively re-login before every authenticated request.
-        // beforeRequest can be async, so the expiry check lives here instead of
-        // being hand-called per method.
+        // Inject auth token before every authenticated request.
+        // No proactive refresh — re-login is reactive only (on 401) to minimize
+        // password-based logins and avoid rate limiting / suspicious-activity flags.
         beforeRequest: [
-          async ({ request }) => {
-            if (!this.tokenState) return;
-            // Proactive re-login if token expires soon — one authoritative place
-            if (this.tokenState.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
-              await this.reLogin();
+          ({ request }) => {
+            if (this.tokenState) {
+              request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
             }
-            request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
           },
         ],
         // On 401 for authenticated requests: re-login and retry once.
