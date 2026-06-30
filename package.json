@@ -37,6 +37,7 @@
     "prepare": "vp config"
   },
   "dependencies": {
+    "ky": "^2.0.2",
     "valibot": "^1.4.2"
   },
   "devDependencies": {

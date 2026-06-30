@@ -1,3 +1,4 @@
+import ky, { type KyInstance } from "ky";
 import * as v from "valibot";
 import {
   KhaanApiError,
@@ -64,14 +65,14 @@ const TransactionListSchema = v.array(TransactionSchema);
 
 // --- Constants --------------------------------------------------------------
 
-const TOKEN_URL = "https://e.khanbank.com/v3/cfrm/auth/token";
 const BASE_URL = "https://e.khanbank.com/v3";
+const TOKEN_PATH = "cfrm/auth/token";
+const TOKEN_URL = `${BASE_URL}/${TOKEN_PATH}`;
 
 // --- Helpers (internal) -----------------------------------------------------
 
 const base64Encode = (value: string): string => {
   if (typeof btoa === "function") return btoa(value);
-  // Node.js fallback
   return Buffer.from(value, "utf-8").toString("base64");
 };
 
@@ -118,14 +119,21 @@ type TokenState = {
  *
  * Interface: `login()`, `loginInitial()`, `dispatchOtp()`, `submitOtp()`, `fetchTransactions()`.
  * Implementation: 3-step SOTP flow, base64 encoding, token caching + auto-refresh,
- * header construction, error parsing, valibot response validation.
+ * header construction, error parsing, valibot response validation, ky HTTP client.
  */
 export class KhaanClient {
   private readonly config: KhaanClientConfig;
+  private readonly http: KyInstance;
   private tokenState: TokenState | null = null;
 
   constructor(config: KhaanClientConfig) {
     this.config = config;
+    this.http = ky.create({
+      baseUrl: `${BASE_URL}/`,
+      headers: this.baseHeaders(),
+      throwHttpErrors: false,
+      retry: 0,
+    });
   }
 
   // --- High-level login ---
@@ -234,24 +242,22 @@ export class KhaanClient {
    */
   async fetchTransactions(): Promise<KhaanTransaction[]> {
     const accessToken = await this.getValidAccessToken();
-    const url = `${BASE_URL}/account-omni/statement/${this.config.accountNumber}/recent/omni`;
+    const url = `account-omni/statement/${this.config.accountNumber}/recent/omni`;
 
-    let response = await fetch(url, {
-      method: "GET",
-      headers: this.authHeaders(accessToken),
+    let response = await this.http.get(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
 
     // If 401, try refreshing the token once and retry
     if (response.status === 401 && this.tokenState?.refreshToken) {
       await this.refreshToken();
-      response = await fetch(url, {
-        method: "GET",
-        headers: this.authHeaders(this.tokenState!.accessToken),
+      response = await this.http.get(url, {
+        headers: { Authorization: `Bearer ${this.tokenState.accessToken}` },
       });
     }
 
     if (!response.ok) {
-      await classifyError(response, url);
+      await classifyError(response, `${BASE_URL}/${url}`);
     }
 
     const json = await response.json();
@@ -284,15 +290,15 @@ export class KhaanClient {
       throw new KhaanAuthError("No refresh token available — re-login required");
     }
 
-    const url = `${TOKEN_URL}?grant_type=refresh_token&refresh_token=${this.tokenState.refreshToken}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: this.baseHeaders(),
+    const response = await this.http.post(TOKEN_PATH, {
+      searchParams: {
+        grant_type: "refresh_token",
+        refresh_token: this.tokenState.refreshToken,
+      },
       body: "{}",
     });
 
     if (!response.ok) {
-      // Refresh failed — clear token state, caller must re-login
       this.tokenState = null;
       const message = await readErrorMessage(response);
       throw new KhaanAuthError(`Token refresh failed: ${message}`, {
@@ -330,14 +336,7 @@ export class KhaanClient {
   ): Promise<v.InferOutput<typeof LoginResponseSchema>> {
     let response: Response;
     try {
-      response = await fetch(TOKEN_URL, {
-        method: "POST",
-        headers: {
-          ...this.baseHeaders(),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+      response = await this.http.post(TOKEN_PATH, { json: payload });
     } catch (error) {
       throw new KhaanNetworkError(
         `Network error during login: ${error instanceof Error ? error.message : String(error)}`,
@@ -365,12 +364,5 @@ export class KhaanClient {
       headers["User-Agent"] = this.config.userAgent;
     }
     return headers;
-  }
-
-  private authHeaders(accessToken: string): Record<string, string> {
-    return {
-      ...this.baseHeaders(),
-      Authorization: `Bearer ${accessToken}`,
-    };
   }
 }
