@@ -11,7 +11,7 @@ import { BASE_URL, TOKEN_PATH, TOKEN_URL } from "../lib/constants.ts";
 import type { KhaanClientConfig, KhaanLoginResult, TokenState } from "./types.ts";
 import type { GetTransactionsOptions, KhaanTransaction } from "../transactions/types.ts";
 
-/** ms before token expiry to proactively refresh */
+/** ms before token expiry to proactively re-login */
 const REFRESH_MARGIN_MS = 30_000;
 
 // --- Client -----------------------------------------------------------------
@@ -21,15 +21,21 @@ const REFRESH_MARGIN_MS = 30_000;
  *
  * Interface: `login()`, `loginInitial()`, `dispatchOtp()`, `submitOtp()`,
  * `fetchTransactions()`, `getTransactions()`.
- * Implementation: 3-step SOTP flow, base64 encoding, token caching + auto-refresh,
+ * Implementation: 3-step SOTP flow, base64 encoding, token caching + auto re-login,
  * ky hooks for auth injection + 401-retry + error classification, valibot validation.
+ *
+ * NOTE: The Khan Bank API returns a `refresh_token` in login responses, but the
+ * Apigee gateway's refresh endpoint is non-functional (returns `invalid_request`
+ * for all attempts). Token renewal is done via re-login using the remembered
+ * device (set via `rememberDevice: "Y"` in step 3 of SOTP), which completes in
+ * a single step without OTP.
  */
 export class KhaanClient {
   private readonly config: KhaanClientConfig;
   private readonly http: KyInstance;
   private tokenState: TokenState | null = null;
-  /** In-flight refresh promise — dedupes concurrent 401s and prevents refresh loops. */
-  private refreshPromise: Promise<void> | null = null;
+  /** In-flight re-login promise — dedupes concurrent 401s and prevents loops. */
+  private reLoginPromise: Promise<void> | null = null;
 
   constructor(config: KhaanClientConfig) {
     this.config = config;
@@ -39,29 +45,28 @@ export class KhaanClient {
       headers: this.baseHeaders(),
       retry: { limit: 0 },
       hooks: {
-        // Inject auth token + proactively refresh before every authenticated request.
+        // Inject auth token + proactively re-login before every authenticated request.
         // beforeRequest can be async, so the expiry check lives here instead of
         // being hand-called per method.
         beforeRequest: [
           async ({ request }) => {
             if (!this.tokenState) return;
-            // Proactive refresh if token expires soon — one authoritative place
+            // Proactive re-login if token expires soon — one authoritative place
             if (this.tokenState.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
-              await this.refreshToken();
+              await this.reLogin();
             }
             request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
           },
         ],
-        // On 401 for authenticated requests: refresh token and retry once.
+        // On 401 for authenticated requests: re-login and retry once.
         // Uses this.http(request) so the retried request respects retry:0 + hooks.
         afterResponse: [
           async ({ request, response }) => {
             if (response.status !== 401) return;
             // Don't retry 401 on the token endpoint itself — bad credentials, not expired token
             if (request.url.startsWith(TOKEN_URL)) return;
-            if (!this.tokenState?.refreshToken) return;
 
-            await this.refreshToken();
+            await this.reLogin();
             // beforeRequest will inject the new token on the retried request
             return this.http(request);
           },
@@ -171,7 +176,7 @@ export class KhaanClient {
 
   /**
    * Fetch recent transactions (~10 latest) for the configured account.
-   * Auth injection and token refresh are handled by ky hooks.
+   * Auth injection and token re-login are handled by ky hooks.
    */
   async fetchTransactions(): Promise<KhaanTransaction[]> {
     this.requireLoggedIn();
@@ -209,26 +214,29 @@ export class KhaanClient {
   }
 
   /**
-   * Refresh the access token using the refresh_token grant.
-   * Dedupes concurrent calls via refreshPromise — all 401s in the same window
-   * share one refresh. The refresh_token is sent in the JSON body, not the URL,
-   * to avoid leaking it into server/proxy logs.
+   * Re-login using stored credentials. The Khan Bank API's refresh_token endpoint
+   * is non-functional, so token renewal is done via a full re-login. Since the
+   * device is remembered (rememberDevice: "Y" set during initial SOTP), this
+   * completes in a single step without OTP.
+   *
+   * Dedupes concurrent calls via reLoginPromise — all 401s in the same window
+   * share one re-login. Uses bare ky (not this.http) to bypass hooks — the
+   * token endpoint should not trigger auth injection or 401-retry logic.
    */
-  private async refreshToken(): Promise<void> {
-    if (this.refreshPromise) return this.refreshPromise;
+  private async reLogin(): Promise<void> {
+    if (this.reLoginPromise) return this.reLoginPromise;
 
-    this.refreshPromise = (async () => {
-      if (!this.tokenState?.refreshToken) {
-        throw new KhaanAuthError("No refresh token available — re-login required");
-      }
-
+    this.reLoginPromise = (async () => {
       try {
         const json = await ky
           .post(`${BASE_URL}/${TOKEN_PATH}`, {
             headers: this.baseHeaders(),
             json: {
-              grant_type: "refresh_token",
-              refresh_token: this.tokenState.refreshToken,
+              username: this.config.username,
+              password: base64Encode(this.config.password),
+              grant_type: "password",
+              channelId: "I",
+              languageId: "003",
             },
             retry: { limit: 0 },
           })
@@ -237,24 +245,23 @@ export class KhaanClient {
         const body = v.parse(LoginResponseSchema, json);
         if (!body.access_token) {
           this.tokenState = null;
-          throw new KhaanAuthError("Token refresh returned no access_token");
+          throw new KhaanAuthError("Re-login returned no access_token — MFA may be required");
         }
         this.setTokenState(body);
       } catch (error) {
         this.tokenState = null;
         if (error instanceof KhaanAuthError) throw error;
-        // Re-classify ky errors (HTTPError, NetworkError, TimeoutError) into typed KhaanErrors
         if (error instanceof Error) {
           throw classifyKyError(error);
         }
-        throw new KhaanNetworkError("Token refresh failed", { endpoint: TOKEN_URL, cause: error });
+        throw new KhaanNetworkError("Re-login failed", { endpoint: TOKEN_URL, cause: error });
       }
     })();
 
     try {
-      await this.refreshPromise;
+      await this.reLoginPromise;
     } finally {
-      this.refreshPromise = null;
+      this.reLoginPromise = null;
     }
   }
 

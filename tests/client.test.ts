@@ -375,4 +375,76 @@ describe("KhaanClient", () => {
 
     expect(getCallUrl(1)).toContain("9999999999");
   });
+
+  // --- reLogin (401 retry + proactive refresh) ---
+
+  test("fetchTransactions — re-login on 401 and retries the request", async () => {
+    // Queue: login, then fetch→401, then re-login (new token), then retry fetch→200
+    const newLoginBody = { ...loginSuccessBody, access_token: "new-access-token" };
+    queueResponses(
+      mockResponse(loginSuccessBody), // initial login
+      mockResponse({ message: "Unauthorized" }, 401), // first fetch → 401
+      mockResponse(newLoginBody), // re-login (afterResponse hook)
+      mockResponse(transactionList), // retry fetch → 200
+    );
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+    const transactions = await client.fetchTransactions();
+
+    expect(transactions).toHaveLength(1);
+    // The retried request should use the new token
+    const retryHeaders = getCallHeaders(3);
+    expect(retryHeaders["authorization"]).toBe("Bearer new-access-token");
+  });
+
+  test("reLogin — uses stored credentials with grant_type=password", async () => {
+    queueResponses(mockResponse(loginSuccessBody), mockResponse(loginSuccessBody));
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+
+    // Trigger reLogin via private method
+    const anyClient = client as unknown as { reLogin(): Promise<void> };
+    await anyClient.reLogin();
+
+    // The re-login call should be a POST to the token endpoint
+    const reLoginCall = capturedCalls[1];
+    expect(reLoginCall.method).toBe("POST");
+    expect(reLoginCall.url).toBe("https://e.khanbank.com/v3/cfrm/auth/token");
+    const body = getCallBody(1);
+    expect(body.grant_type).toBe("password");
+    expect(body.username).toBe("testuser");
+  });
+
+  test("reLogin — dedupes concurrent calls", async () => {
+    queueResponses(
+      mockResponse(loginSuccessBody), // initial login
+      mockResponse(loginSuccessBody), // only ONE re-login response
+    );
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+
+    // Fire two concurrent reLogin calls
+    const anyClient = client as unknown as { reLogin(): Promise<void> };
+    await Promise.all([anyClient.reLogin(), anyClient.reLogin()]);
+
+    // Only one re-login HTTP call should have been made (call index 1)
+    // Call 0 = initial login, call 1 = the single shared re-login
+    expect(capturedCalls).toHaveLength(2);
+  });
+
+  test("reLogin — throws KhaanAuthError when re-login requires MFA", async () => {
+    queueResponses(
+      mockResponse(loginSuccessBody), // initial login
+      mockResponse(mfaRequiredBody), // re-login returns MFA required (no access_token)
+    );
+
+    const client = new KhaanClient(baseConfig);
+    await client.loginInitial();
+
+    const anyClient = client as unknown as { reLogin(): Promise<void> };
+    await expect(anyClient.reLogin()).rejects.toThrow(KhaanAuthError);
+  });
 });
