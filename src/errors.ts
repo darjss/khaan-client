@@ -17,8 +17,9 @@ export class KhaanError extends Error {
 /** Authentication failed — wrong username/password, invalid OTP, etc. */
 export class KhaanAuthError extends KhaanError {}
 
-/** MFA-specific error — SOTP dispatch failed, OTP rejected, etc. */
-export class KhaanMfaError extends KhaanError {}
+/** MFA-specific error — SOTP dispatch failed, OTP rejected, etc.
+ * Extends KhaanAuthError so a single `instanceof KhaanAuthError` catches both. */
+export class KhaanMfaError extends KhaanAuthError {}
 
 /** Generic API error — unexpected response from Khan Bank. */
 export class KhaanApiError extends KhaanError {}

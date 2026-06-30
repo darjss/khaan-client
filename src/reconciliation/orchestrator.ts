@@ -1,6 +1,6 @@
 import type { KhaanClient } from "../auth/client.ts";
 import type { KhaanTransaction } from "../transactions/types.ts";
-import { KhaanAuthError, KhaanMfaError } from "../errors.ts";
+import { KhaanAuthError } from "../errors.ts";
 import { type MatchedKhaanTransaction, findMatchingKhaanTransfer } from "./matching.ts";
 
 // --- Types (public) ---------------------------------------------------------
@@ -108,21 +108,19 @@ export function reconcileTransfer(
         lastError: null,
       };
 
-      // Login once at the start — reuse token across all polls
+      // Login once at the start — reuse token across all polls.
+      // KhaanMfaError extends KhaanAuthError, so one instanceof catches both.
+      let loggedIn = false;
       try {
         await client.login(onOtp ? { onOtp } : undefined);
+        loggedIn = true;
       } catch (error) {
-        if (error instanceof KhaanMfaError) {
-          state = { ...state, status: "auth_required", lastError: errorMessage(error) };
-          yield state;
-          return;
-        }
         if (error instanceof KhaanAuthError) {
           state = { ...state, status: "auth_required", lastError: errorMessage(error) };
           yield state;
           return;
         }
-        // Non-auth error — yield polling state with error, will retry login next cycle
+        // Non-auth error — yield polling state, will retry login next cycle
         state = { ...state, lastError: errorMessage(error) };
         yield state;
       }
@@ -139,6 +137,24 @@ export function reconcileTransfer(
           await hooks.onTimeout?.(paymentNumber);
           yield state;
           return;
+        }
+
+        // Retry login if the initial attempt failed with a non-auth error
+        if (!loggedIn) {
+          try {
+            await client.login(onOtp ? { onOtp } : undefined);
+            loggedIn = true;
+          } catch (error) {
+            if (error instanceof KhaanAuthError) {
+              state = { ...state, status: "auth_required", lastError: errorMessage(error) };
+              yield state;
+              return;
+            }
+            state = { ...state, lastError: errorMessage(error) };
+            yield state;
+            await sleep(pollIntervalMs, signal);
+            continue;
+          }
         }
 
         state = await poll(client, hooks, state);

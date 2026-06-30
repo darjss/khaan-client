@@ -1,4 +1,4 @@
-import { HTTPError, isHTTPError, isNetworkError } from "ky";
+import { HTTPError, isHTTPError, isNetworkError, isTimeoutError } from "ky";
 import * as v from "valibot";
 import {
   KhaanApiError,
@@ -52,14 +52,16 @@ export const classifyHttpError = (error: HTTPError): KhaanError => {
 
 /**
  * ky `beforeError` hook that classifies all ky errors into typed KhaanErrors.
+ * HTTPError → Auth/RateLimit/Api by status. Network/Timeout → KhaanNetworkError.
+ * Unknown ky errors default to KhaanNetworkError so callers always get a typed error.
  */
-export const classifyKyError = (error: Error): Error => {
+export const classifyKyError = (error: Error): KhaanError => {
   if (isHTTPError(error)) return classifyHttpError(error);
-  if (isNetworkError(error)) {
+  if (isNetworkError(error) || isTimeoutError(error)) {
     return new KhaanNetworkError(`Network error: ${error.message}`, {
-      endpoint: error.request.url,
+      endpoint: "request" in error ? (error.request as Request).url : undefined,
       cause: error,
     });
   }
-  return error;
+  return new KhaanNetworkError(`Network error: ${error.message}`, { cause: error });
 };

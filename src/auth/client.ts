@@ -11,6 +11,9 @@ import { BASE_URL, TOKEN_PATH, TOKEN_URL } from "../lib/constants.ts";
 import type { KhaanClientConfig, KhaanLoginResult, TokenState } from "./types.ts";
 import type { GetTransactionsOptions, KhaanTransaction } from "../transactions/types.ts";
 
+/** ms before token expiry to proactively refresh */
+const REFRESH_MARGIN_MS = 30_000;
+
 // --- Client -----------------------------------------------------------------
 
 /**
@@ -25,8 +28,8 @@ export class KhaanClient {
   private readonly config: KhaanClientConfig;
   private readonly http: KyInstance;
   private tokenState: TokenState | null = null;
-  /** Guards against infinite refresh loops in the afterResponse hook. */
-  private refreshing = false;
+  /** In-flight refresh promise — dedupes concurrent 401s and prevents refresh loops. */
+  private refreshPromise: Promise<void> | null = null;
 
   constructor(config: KhaanClientConfig) {
     this.config = config;
@@ -36,30 +39,34 @@ export class KhaanClient {
       headers: this.baseHeaders(),
       retry: { limit: 0 },
       hooks: {
+        // Inject auth token + proactively refresh before every authenticated request.
+        // beforeRequest can be async, so the expiry check lives here instead of
+        // being hand-called per method.
         beforeRequest: [
-          ({ request }) => {
-            if (this.tokenState) {
-              request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
+          async ({ request }) => {
+            if (!this.tokenState) return;
+            // Proactive refresh if token expires soon — one authoritative place
+            if (this.tokenState.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
+              await this.refreshToken();
             }
+            request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
           },
         ],
+        // On 401 for authenticated requests: refresh token and retry once.
+        // Uses this.http(request) so the retried request respects retry:0 + hooks.
         afterResponse: [
           async ({ request, response }) => {
             if (response.status !== 401) return;
+            // Don't retry 401 on the token endpoint itself — bad credentials, not expired token
             if (request.url.startsWith(TOKEN_URL)) return;
             if (!this.tokenState?.refreshToken) return;
-            if (this.refreshing) return;
 
-            try {
-              this.refreshing = true;
-              await this.refreshToken();
-              request.headers.set("Authorization", `Bearer ${this.tokenState.accessToken}`);
-              return ky(request);
-            } finally {
-              this.refreshing = false;
-            }
+            await this.refreshToken();
+            // beforeRequest will inject the new token on the retried request
+            return this.http(request);
           },
         ],
+        // Classify ky errors into typed KhaanErrors before they reach the caller
         beforeError: [({ error }) => classifyKyError(error)],
       },
     });
@@ -163,18 +170,14 @@ export class KhaanClient {
   // --- Transactions ---
 
   /**
-   * Fetch recent transactions (~10 latest).
-   * Auto-refreshes the token if it's expired or about to expire (proactive),
-   * and again reactively on 401 via the ky afterResponse hook.
+   * Fetch recent transactions (~10 latest) for the configured account.
+   * Auth injection and token refresh are handled by ky hooks.
    */
   async fetchTransactions(): Promise<KhaanTransaction[]> {
     this.requireLoggedIn();
-    await this.ensureFreshToken();
-
     const json = await this.http
       .get(`account-omni/statement/${this.config.accountNumber}/recent/omni`)
       .json();
-
     return v.parse(TransactionListSchema, json);
   }
 
@@ -187,27 +190,14 @@ export class KhaanClient {
    */
   async getTransactions(options?: GetTransactionsOptions): Promise<KhaanTransaction[]> {
     this.requireLoggedIn();
-    await this.ensureFreshToken();
 
     const accountNumber = options?.accountNumber ?? this.config.accountNumber;
-
     const json = await this.http.get(`account-omni/statement/${accountNumber}/recent/omni`).json();
-
     const transactions = v.parse(TransactionListSchema, json);
 
-    if (!options?.fromDate && !options?.toDate) {
-      return transactions;
-    }
+    if (!options?.fromDate && !options?.toDate) return transactions;
 
-    const fromMs = options.fromDate ? Date.parse(options.fromDate) : -Infinity;
-    const toMs = options.toDate ? Date.parse(options.toDate) + 86_400_000 : Infinity;
-
-    return transactions.filter((tx) => {
-      if (!tx.tranDate) return false;
-      const txMs = Date.parse(tx.tranDate);
-      if (Number.isNaN(txMs)) return false;
-      return txMs >= fromMs && txMs < toMs;
-    });
+    return filterByDateRange(transactions, options.fromDate, options.toDate);
   }
 
   // --- Internal: token management ---
@@ -218,56 +208,63 @@ export class KhaanClient {
     }
   }
 
-  private async ensureFreshToken(): Promise<void> {
-    if (!this.tokenState) return;
-    if (this.tokenState.expiresAt - Date.now() < 30_000) {
-      await this.refreshToken();
-    }
-  }
-
+  /**
+   * Refresh the access token using the refresh_token grant.
+   * Dedupes concurrent calls via refreshPromise — all 401s in the same window
+   * share one refresh. The refresh_token is sent in the JSON body, not the URL,
+   * to avoid leaking it into server/proxy logs.
+   */
   private async refreshToken(): Promise<void> {
-    if (!this.tokenState?.refreshToken) {
-      throw new KhaanAuthError("No refresh token available — re-login required");
-    }
+    if (this.refreshPromise) return this.refreshPromise;
 
-    const json = await ky
-      .post(`${BASE_URL}/${TOKEN_PATH}`, {
-        searchParams: {
-          grant_type: "refresh_token",
-          refresh_token: this.tokenState.refreshToken,
-        },
-        headers: this.baseHeaders(),
-        body: "{}",
-        retry: { limit: 0 },
-      })
-      .json()
-      .catch((error: unknown) => {
-        this.tokenState = null;
-        const classified = classifyKyError(error as Error);
-        if (classified instanceof KhaanAuthError) {
-          throw new KhaanAuthError(`Token refresh failed: ${classified.message}`, {
-            statusCode: classified.statusCode,
-            endpoint: TOKEN_URL,
-          });
+    this.refreshPromise = (async () => {
+      if (!this.tokenState?.refreshToken) {
+        throw new KhaanAuthError("No refresh token available — re-login required");
+      }
+
+      try {
+        const json = await ky
+          .post(`${BASE_URL}/${TOKEN_PATH}`, {
+            headers: this.baseHeaders(),
+            json: {
+              grant_type: "refresh_token",
+              refresh_token: this.tokenState.refreshToken,
+            },
+            retry: { limit: 0 },
+          })
+          .json();
+
+        const body = v.parse(LoginResponseSchema, json);
+        if (!body.access_token) {
+          this.tokenState = null;
+          throw new KhaanAuthError("Token refresh returned no access_token");
         }
-        throw new KhaanNetworkError("Token refresh network error", {
-          endpoint: TOKEN_URL,
-          cause: error,
-        });
-      });
+        this.setTokenState(body);
+      } catch (error) {
+        this.tokenState = null;
+        if (error instanceof KhaanAuthError) throw error;
+        // Re-classify ky errors (HTTPError, NetworkError, TimeoutError) into typed KhaanErrors
+        if (error instanceof Error) {
+          throw classifyKyError(error);
+        }
+        throw new KhaanNetworkError("Token refresh failed", { endpoint: TOKEN_URL, cause: error });
+      }
+    })();
 
-    const body = v.parse(LoginResponseSchema, json);
-    if (!body.access_token) {
-      this.tokenState = null;
-      throw new KhaanAuthError("Token refresh returned no access_token");
+    try {
+      await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
     }
-    this.setTokenState(body);
   }
 
   private setTokenState(body: LoginResponseBody): void {
+    if (!body.access_token) {
+      throw new KhaanAuthError("Cannot set token state — no access_token in response");
+    }
     const expiresIn = Number(body.access_token_expires_in) || 300;
     this.tokenState = {
-      accessToken: body.access_token!,
+      accessToken: body.access_token,
       refreshToken: body.refresh_token,
       expiresAt: Date.now() + expiresIn * 1000,
     };
@@ -291,4 +288,38 @@ export class KhaanClient {
     }
     return headers;
   }
+}
+
+// --- Internal: date filtering ---
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Filter transactions by date range (inclusive on both ends).
+ * Throws on unparseable dates so bad input is surfaced, not silently dropped.
+ */
+function filterByDateRange(
+  transactions: KhaanTransaction[],
+  fromDate?: string,
+  toDate?: string,
+): KhaanTransaction[] {
+  const fromMs = fromDate ? Date.parse(fromDate) : -Infinity;
+  const toMs = toDate ? Date.parse(toDate) : Infinity;
+
+  if (fromDate && Number.isNaN(fromMs)) {
+    throw new Error(`Invalid fromDate: ${fromDate}`);
+  }
+  if (toDate && Number.isNaN(toMs)) {
+    throw new Error(`Invalid toDate: ${toDate}`);
+  }
+
+  // toDate is inclusive — extend to end of day
+  const endMs = toMs === Infinity ? Infinity : toMs + ONE_DAY_MS;
+
+  return transactions.filter((tx) => {
+    if (!tx.tranDate) return false;
+    const txMs = Date.parse(tx.tranDate);
+    if (Number.isNaN(txMs)) return false;
+    return txMs >= fromMs && txMs < endMs;
+  });
 }
