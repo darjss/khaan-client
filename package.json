@@ -33,8 +33,7 @@
     "dev": "vp pack --watch",
     "test": "vp test",
     "check": "vp check",
-    "prepublishOnly": "vp run build",
-    "prepare": "vp config"
+    "prepublishOnly": "vp run build"
   },
   "dependencies": {
     "ky": "^2.0.2",
