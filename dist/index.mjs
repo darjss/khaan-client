@@ -6,7 +6,7 @@ import {
   r as KhaanError,
   t as KhaanApiError,
 } from "./errors-DHX6vOcB.mjs";
-import { t as KhaanClient } from "./client-fLGG2prn.mjs";
+import { t as KhaanClient } from "./client-BQfj1GNl.mjs";
 import {
   n as findMatchingKhaanTransfer,
   r as isIncoming,

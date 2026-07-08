@@ -7,15 +7,13 @@ type KhaanClientConfig = {
   accountNumber: string;
   branchCode?: string;
 };
-type KhaanLoginResult =
-  | {
-      status: "logged_in";
-      accessToken: string;
-    }
-  | {
-      status: "mfa_required";
-      requestId: string;
-    };
+type KhaanLoginResult = {
+  status: "logged_in";
+  accessToken: string;
+} | {
+  status: "mfa_required";
+  requestId: string;
+};
 //#endregion
 //#region src/transactions/types.d.ts
 type KhaanTransaction = {
@@ -25,10 +23,13 @@ type KhaanTransaction = {
   description?: string;
   balance?: number;
   relatedAccount?: string;
+  currency?: string;
+  code?: string;
+  refId?: string;
 };
 type GetTransactionsOptions = {
-  /** Override the account number from client config. */ accountNumber?: string /** Filter: only transactions on or after this date (inclusive). Format: ISO 8601 or YYYY-MM-DD. */;
-  fromDate?: string /** Filter: only transactions on or before this date (inclusive). Format: ISO 8601 or YYYY-MM-DD. */;
+  /** Override the account number from client config. */accountNumber?: string; /** Filter: only transactions on or after this date (inclusive). Format: ISO 8601 or YYYY-MM-DD. */
+  fromDate?: string; /** Filter: only transactions on or before this date (inclusive). Format: ISO 8601 or YYYY-MM-DD. */
   toDate?: string;
 };
 //#endregion
@@ -66,7 +67,9 @@ declare class KhaanClient {
    * to get the code, then submits + remembers the device.
    * If MFA is required and `onOtp` is absent, throws `KhaanMfaError`.
    */
-  login(options?: { onOtp?: (requestId: string) => Promise<string> }): Promise<{
+  login(options?: {
+    onOtp?: (requestId: string) => Promise<string>;
+  }): Promise<{
     accessToken: string;
   }>;
   /** Step 1: initial login. Returns mfa_required + requestId if MFA needed. */
@@ -74,10 +77,7 @@ declare class KhaanClient {
   /** Step 2: dispatch SOTP to the user's registered phone/email. */
   dispatchOtp(requestId: string): Promise<void>;
   /** Step 3: submit OTP + rememberDevice. Returns tokens. */
-  submitOtp(
-    requestId: string,
-    otp: string,
-  ): Promise<{
+  submitOtp(requestId: string, otp: string): Promise<{
     accessToken: string;
   }>;
   /**
@@ -109,20 +109,17 @@ type MatchedKhaanTransaction = {
   relatedAccount?: string;
   balance?: number;
 };
-type KhaanMatchResult =
-  | {
-      status: "none";
-      matches: [];
-    }
-  | {
-      status: "matched";
-      match: MatchedKhaanTransaction;
-      matches: [MatchedKhaanTransaction];
-    }
-  | {
-      status: "ambiguous";
-      matches: MatchedKhaanTransaction[];
-    };
+type KhaanMatchResult = {
+  status: "none";
+  matches: [];
+} | {
+  status: "matched";
+  match: MatchedKhaanTransaction;
+  matches: [MatchedKhaanTransaction];
+} | {
+  status: "ambiguous";
+  matches: MatchedKhaanTransaction[];
+};
 /**
  * A transaction is "incoming" if the amount is positive.
  * The Khan Bank statement API doesn't expose amount-type codes,
@@ -145,14 +142,7 @@ declare function findMatchingKhaanTransfer(input: {
 }): KhaanMatchResult;
 //#endregion
 //#region src/reconciliation/orchestrator.d.ts
-type TransferReconciliationStatus =
-  | "polling"
-  | "matched"
-  | "confirmed"
-  | "timeout"
-  | "auth_required"
-  | "ambiguous"
-  | "failed";
+type TransferReconciliationStatus = "polling" | "matched" | "confirmed" | "timeout" | "auth_required" | "ambiguous" | "failed";
 type TransferReconciliationState = {
   paymentNumber: string;
   status: TransferReconciliationStatus;
@@ -163,37 +153,25 @@ type TransferReconciliationState = {
   lastError: string | null;
 };
 type ReconcilerHooks = {
-  /** Is this payment still pending? What amount do we expect? */ getPayment: (
-    paymentNumber: string,
-  ) => Promise<
-    | {
-        status: "confirmable";
-        expectedAmount: number;
-      }
-    | {
-        status: "already_confirmed";
-      }
-    | {
-        status: "not_found";
-      }
-  > /** A unique match was found. Confirm + notify. Return whether confirmation succeeded. */;
-  onMatched: (
-    paymentNumber: string,
-    match: MatchedKhaanTransaction,
-  ) => Promise<{
+  /** Is this payment still pending? What amount do we expect? */getPayment: (paymentNumber: string) => Promise<{
+    status: "confirmable";
+    expectedAmount: number;
+  } | {
+    status: "already_confirmed";
+  } | {
+    status: "not_found";
+  }>; /** A unique match was found. Confirm + notify. Return whether confirmation succeeded. */
+  onMatched: (paymentNumber: string, match: MatchedKhaanTransaction) => Promise<{
     confirmed: boolean;
     reason?: string;
-  }> /** Multiple matches — caller must resolve manually. */;
-  onAmbiguous?: (
-    paymentNumber: string,
-    matches: MatchedKhaanTransaction[],
-  ) => Promise<void> /** Timed out without a match. */;
+  }>; /** Multiple matches — caller must resolve manually. */
+  onAmbiguous?: (paymentNumber: string, matches: MatchedKhaanTransaction[]) => Promise<void>; /** Timed out without a match. */
   onTimeout?: (paymentNumber: string) => Promise<void>;
 };
 type ReconcilerOptions = {
   pollIntervalMs?: number;
   maxPollMs?: number;
-  signal?: AbortSignal /** OTP callback — if login requires MFA. If omitted and MFA is needed, status becomes auth_required. */;
+  signal?: AbortSignal; /** OTP callback — if login requires MFA. If omitted and MFA is needed, status becomes auth_required. */
   onOtp?: (requestId: string) => Promise<string>;
 };
 /**
@@ -206,26 +184,6 @@ type ReconcilerOptions = {
  * Yields a `TransferReconciliationState` after every poll cycle and on terminal status.
  * The iterator ends after yielding a terminal state.
  */
-declare function reconcileTransfer(
-  client: KhaanClient,
-  hooks: ReconcilerHooks,
-  paymentNumber: string,
-  options?: ReconcilerOptions,
-): AsyncIterable<TransferReconciliationState>;
+declare function reconcileTransfer(client: KhaanClient, hooks: ReconcilerHooks, paymentNumber: string, options?: ReconcilerOptions): AsyncIterable<TransferReconciliationState>;
 //#endregion
-export {
-  reconcileTransfer as a,
-  findMatchingKhaanTransfer as c,
-  GetTransactionsOptions as d,
-  KhaanTransaction as f,
-  TransferReconciliationStatus as i,
-  isIncoming as l,
-  KhaanLoginResult as m,
-  ReconcilerOptions as n,
-  KhaanMatchResult as o,
-  KhaanClientConfig as p,
-  TransferReconciliationState as r,
-  MatchedKhaanTransaction as s,
-  ReconcilerHooks as t,
-  KhaanClient as u,
-};
+export { reconcileTransfer as a, findMatchingKhaanTransfer as c, GetTransactionsOptions as d, KhaanTransaction as f, TransferReconciliationStatus as i, isIncoming as l, KhaanLoginResult as m, ReconcilerOptions as n, KhaanMatchResult as o, KhaanClientConfig as p, TransferReconciliationState as r, MatchedKhaanTransaction as s, ReconcilerHooks as t, KhaanClient as u };

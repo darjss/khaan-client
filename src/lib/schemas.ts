@@ -33,6 +33,9 @@ export const TransactionSchema = v.object({
   description: v.optional(v.string()),
   balance: v.optional(v.number()),
   relatedAccount: v.optional(v.string()),
+  currency: v.optional(v.string()),
+  code: v.optional(v.string()),
+  refId: v.optional(v.string()),
 });
 
 export const TransactionListSchema = v.array(TransactionSchema);

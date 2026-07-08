@@ -180,7 +180,9 @@ export class KhaanClient {
   async fetchTransactions(): Promise<KhaanTransaction[]> {
     this.requireLoggedIn();
     const json = await this.http
-      .get(`account-omni/statement/${this.config.accountNumber}/recent/omni`)
+      .get("omni/user/custom/recentTransactions", {
+        searchParams: { account: this.config.accountNumber },
+      })
       .json();
     return v.parse(TransactionListSchema, json);
   }
@@ -196,7 +198,11 @@ export class KhaanClient {
     this.requireLoggedIn();
 
     const accountNumber = options?.accountNumber ?? this.config.accountNumber;
-    const json = await this.http.get(`account-omni/statement/${accountNumber}/recent/omni`).json();
+    const json = await this.http
+      .get("omni/user/custom/recentTransactions", {
+        searchParams: { account: accountNumber },
+      })
+      .json();
     const transactions = v.parse(TransactionListSchema, json);
 
     if (!options?.fromDate && !options?.toDate) return transactions;

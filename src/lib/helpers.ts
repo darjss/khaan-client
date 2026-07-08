@@ -56,6 +56,7 @@ export const classifyHttpError = (error: HTTPError): KhaanError => {
  * Unknown ky errors default to KhaanNetworkError so callers always get a typed error.
  */
 export const classifyKyError = (error: Error): KhaanError => {
+  if (error instanceof KhaanError) return error;
   if (isHTTPError(error)) return classifyHttpError(error);
   if (isNetworkError(error) || isTimeoutError(error)) {
     return new KhaanNetworkError(`Network error: ${error.message}`, {

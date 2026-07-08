@@ -5,6 +5,9 @@ export type KhaanTransaction = {
   description?: string;
   balance?: number;
   relatedAccount?: string;
+  currency?: string;
+  code?: string;
+  refId?: string;
 };
 
 export type GetTransactionsOptions = {
