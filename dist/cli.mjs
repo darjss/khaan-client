@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { t as KhaanClient } from "./client-BQfj1GNl.mjs";
+import { t as KhaanClient } from "./client-H2qqfaK9.mjs";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";

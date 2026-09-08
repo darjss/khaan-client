@@ -143,8 +143,14 @@ describe("KhaanClient", () => {
       expect(result.accessToken).toBe("test-access-token");
     }
 
-    expect(getCallUrl(0)).toBe("https://e.khanbank.com/v3/cfrm/auth/token");
+    const url = new URL(getCallUrl(0));
+    expect(url.origin + url.pathname).toBe("https://api.khanbank.com:9003/v3/cfrm/auth/token");
+    expect(url.searchParams.get("grant_type")).toBe("password");
+    expect(url.searchParams.get("username")).toBe("testuser");
+    expect(url.searchParams.get("password")).toBe(btoa("testpass"));
+    expect(url.searchParams.get("channelId")).toBe("I");
     expect(getCallMethod(0)).toBe("POST");
+    expect(getCallHeaders(0)["authorization"]).toMatch(/^Basic /);
     const body = getCallBody(0);
     expect(body.username).toBe("testuser");
     expect(body.grant_type).toBe("password");
@@ -411,7 +417,10 @@ describe("KhaanClient", () => {
     // The re-login call should be a POST to the token endpoint
     const reLoginCall = capturedCalls[1];
     expect(reLoginCall.method).toBe("POST");
-    expect(reLoginCall.url).toBe("https://e.khanbank.com/v3/cfrm/auth/token");
+    const url = new URL(reLoginCall.url);
+    expect(url.origin + url.pathname).toBe("https://api.khanbank.com:9003/v3/cfrm/auth/token");
+    expect(url.searchParams.get("grant_type")).toBe("password");
+    expect(url.searchParams.get("username")).toBe("testuser");
     const body = getCallBody(1);
     expect(body.grant_type).toBe("password");
     expect(body.username).toBe("testuser");
